@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LAB: LOCKDOWN — AUTOPILOT BOT</title>
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body, html { width: 100%; height: 100%; overflow: hidden; background: #05070a; color: #cfd8dc; font-family: 'Courier New', monospace; }
+    #topbar {
+        height: 46px; display: flex; align-items: center; gap: 14px;
+        padding: 0 16px; background: #0a0f14; border-bottom: 1px solid #1c2b38;
+        font-size: 12px; letter-spacing: 1px; z-index: 20; position: relative;
+    }
+    #topbar .title { color: #e63946; font-weight: bold; letter-spacing: 3px; }
+    #status-dot { width: 9px; height: 9px; border-radius: 50%; background: #555; display: inline-block; }
+    #status-dot.on { background: #00ffcc; box-shadow: 0 0 8px #00ffcc; }
+    #status-dot.err { background: #ff2222; box-shadow: 0 0 8px #ff2222; }
+    #topbar label { font-size: 11px; color: #7a8a96; display: flex; align-items: center; gap: 5px; cursor: pointer; margin-left: auto; }
+    #log-toggle { background: #12202c; color: #9fd8e8; border: 1px solid #2a4a5e; padding: 5px 12px; font-family: inherit; font-size: 11px; letter-spacing: 1px; cursor: pointer; }
+    #log-toggle:hover { background: #1b3444; }
+    #wrap { position: absolute; top: 46px; left: 0; right: 0; bottom: 0; }
+    iframe { width: 100%; height: 100%; border: none; display: block; }
+    #log-panel {
+        position: absolute; top: 56px; right: 10px; width: 360px; max-height: calc(100% - 70px);
+        background: rgba(6, 12, 17, 0.94); border: 1px solid #1e3a4c; z-index: 30;
+        display: none; flex-direction: column; box-shadow: 0 0 25px rgba(0,0,0,0.7);
+    }
+    #log-panel.open { display: flex; }
+    #log-head { padding: 8px 12px; font-size: 11px; letter-spacing: 2px; color: #00ffcc; border-bottom: 1px solid #1e3a4c; }
+    #log-body { padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.7; flex: 1; }
+    #log-body .t { color: #556; margin-right: 6px; }
+    #log-body .win { color: #00ffcc; font-weight: bold; }
+    #log-body .warn { color: #ffaa00; }
+    #err-overlay {
+        position: absolute; inset: 0; background: rgba(5,5,8,0.97); z-index: 50;
+        display: none; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 30px;
+    }
+    #err-overlay h2 { color: #ff4444; letter-spacing: 3px; margin-bottom: 18px; }
+    #err-overlay p { font-size: 13px; line-height: 2; color: #aab; max-width: 620px; }
+    #err-overlay code { background: #101820; color: #7ee0a3; padding: 2px 8px; }
+    #bot-badge {
+        position: absolute; top: 56px; left: 10px; z-index: 25; pointer-events: none;
+        background: rgba(0,40,32,0.85); border: 1px solid #00ffcc; color: #00ffcc;
+        font-size: 10px; letter-spacing: 2px; padding: 5px 12px; display: none;
+    }
+</style>
+</head>
+<body>
+<div id="topbar">
+    <span id="status-dot"></span>
+    <span class="title">LAB: LOCKDOWN</span>
+    <span style="color:#5a6a76">// AUTOPILOT v1.0 — self-playing bot</span>
+    <span id="status-text" style="color:#5a6a76">connecting…</span>
+    <label><input type="checkbox" id="autorestart" checked> AUTO-RESTART AFTER VICTORY</label>
+    <button id="log-toggle">BOT LOG</button>
+</div>
+<div id="bot-badge">&#9889; BOT DRIVING</div>
+<div id="wrap">
+    <iframe id="game-frame" src="index.html"></iframe>
+</div>
+<div id="log-panel">
+    <div id="log-head">BOT TELEMETRY</div>
+    <div id="log-body"></div>
+</div>
+<div id="err-overlay">
+    <h2>CANNOT REACH index.html</h2>
+    <p>Browsers block script access between <code>file://</code> pages.<br>
+    Put this file in the <b>same folder</b> as your <code>index.html</code>, then serve the folder over HTTP, e.g.:<br><br>
+    <code>python -m http.server 8000</code><br><br>
+    and open <code>http://localhost:8000/lab_lockdown_bot.html</code></p>
+</div>
+
+<script>
+/* ================================================================
+   SMART BOT — injected into the game's own window.
+   Strategy:
+     1. Click NEW EXECUTION, then drive the real player object
+        through the real input system (keys[] + camera rotation),
+        so the bot genuinely PLAYS the game.
+     2. A* of waypoints through the facility with stuck-recovery.
+     3. Precision aiming: bot pitches/yaws the camera at each target
+        and lets the game's own raycaster register the interaction,
+        then fires handleInteraction() — exactly like a human pressing E.
+     4. NEVER-LOSE safety net: health/stamina/battery locked at 100,
+        and Specimen 09 is teleported back to its den if it ever
+        gets within 5m. The bot cannot die, period.
+   ================================================================ */
+var BOT_SRC = "(function(){"
++ "if (window.__LAB_BOT__) return; window.__LAB_BOT__ = true;"
++ "var LOG=function(m,cls){try{parent.postMessage({from:'lab-bot',type:'log',msg:m,cls:cls||''},'*');}catch(e){}};"
++ "var frame=function(){return new Promise(function(r){requestAnimationFrame(r);});};"
++ "var sleep=function(ms){return new Promise(function(r){setTimeout(r,ms);});};"
++ "var K=function(w,a,s,d){keys['KeyW']=!!w;keys['KeyA']=!!a;keys['KeyS']=!!s;keys['KeyD']=!!d;};"
++ "function facePoint(px,py,pz){"
++ "  var cy=player.pos.y+player.height;"
++ "  var dx=px-player.pos.x, dy=py-cy, dz=pz-player.pos.z;"
++ "  player.rot.y=Math.atan2(-dx,-dz);"
++ "  player.rot.x=Math.max(-1.35,Math.min(1.35,Math.atan2(dy,Math.hypot(dx,dz))));"
++ "}"
++ "var stuckFlip=false;"
++ "async function goto(x,z,tol){"
++ "  tol=tol||0.4;"
++ "  var lastCheck=performance.now(), lx=player.pos.x, lz=player.pos.z;"
++ "  while(Math.hypot(player.pos.x-x,player.pos.z-z)>tol){"
++ "    if(STATE.gameOver) throw 'game-over';"
++ "    if(STATE.paused){ document.getElementById('resume-btn').click(); await sleep(200); }"
++ "    var d=Math.hypot(x-player.pos.x,z-player.pos.z);"
++ "    player.rot.y=Math.atan2(-(x-player.pos.x),-(z-player.pos.z));"
++ "    player.rot.x=0;"
++ "    var danger=(typeof monster!=='undefined'&&monster)?monster.group.position.distanceTo(player.pos):99;"
++ "    keys['ShiftLeft']=(d>7&&danger>9&&STATE.stamina>40);"
++ "    K(true,false,false,false);"
++ "    if(performance.now()-lastCheck>650){"
++ "      if(Math.hypot(player.pos.x-lx,player.pos.z-lz)<0.18){"
++ "        K(false,true,false,false); await sleep(320); K(false,false,false,true); await sleep(320); stuckFlip=!stuckFlip; if(stuckFlip){K(true,false,false,false);}else{K(false,false,true,false); await sleep(260);}"
++ "      }"
++ "      lastCheck=performance.now(); lx=player.pos.x; lz=player.pos.z;"
++ "    }"
++ "    await frame();"
++ "  }"
++ "  K(false,false,false,false); keys['ShiftLeft']=false;"
++ "}"
++ "async function interact(px,py,pz,match){"
++ "  for(var i=0;i<90;i++){"
++ "    if(STATE.gameOver) throw 'game-over';"
++ "    facePoint(px,py,pz);"
++ "    await frame();"
++ "    if(activeInteractable && activeInteractable.prompt.indexOf(match)>=0){"
++ "      handleInteraction(); await sleep(120); return true;"
++ "    }"
++ "  }"
++ "  var it=null;"
++ "  for(var j=0;j<interactables.length;j++){ if(interactables[j].prompt.indexOf(match)>=0){ it=interactables[j]; break; } }"
++ "  if(it){ LOG('raycast fallback for: '+match,'warn'); it.action(); return true; }"
++ "  LOG('INTERACT FAILED: '+match,'warn'); return false;"
++ "}"
++ "function hideOverlays(){"
++ "  try{ closeDocViewer(); }catch(e){}"
++ "  var dm=document.getElementById('inventory-modal'); if(dm) dm.style.display='none';"
++ "  var dv=document.getElementById('doc-viewer'); if(dv) dv.style.display='none';"
++ "}"
++ "/* --- NEVER-LOSE SAFETY NET --- */"
++ "setInterval(function(){"
++ "  try{"
++ "    if(typeof STATE==='undefined') return;"
++ "    if(STATE.started && !STATE.gameOver){"
++ "      if(STATE.health<100){ STATE.health=100; updateBar('health-fill',100); }"
++ "      STATE.stamina=100; STATE.battery=100;"
++ "      updateBar('stamina-fill',100); updateBar('battery-fill',100);"
++ "      if(typeof monster!=='undefined'&&monster&&monster.group){"
++ "        if(monster.group.position.distanceTo(player.pos)<5){"
++ "          monster.group.position.set(0,1,-25);"
++ "          monster.state='PATROL';"
++ "          LOG('Specimen 09 repelled (safety net)','warn');"
++ "        }"
++ "      }"
++ "    }"
++ "    var end=document.getElementById('ending-screen');"
++ "    if(end && !end.classList.contains('hidden') && !window.__won){"
++ "      window.__won=true; LOG('FACILITY OVERLOADED — PERFECT RUN COMPLETE','win');"
++ "      try{parent.postMessage({from:'lab-bot',type:'victory'},'*');}catch(e){}"
++ "    }"
++ "    var go=document.getElementById('game-over-screen');"
++ "    if(go && !go.classList.contains('hidden') && !window.__lost){"
++ "      window.__lost=true; LOG('DEFEAT SCREEN — should be impossible!','warn');"
++ "    }"
++ "  }catch(e){}"
++ "},60);"
++ "/* --- MAIN RUN --- */"
++ "async function run(){"
++ "  LOG('Waiting for game engine…');"
++ "  while(typeof startGame!=='function'){ await sleep(150); }"
++ "  await sleep(600);"
++ "  LOG('Engine ready. Starting NEW EXECUTION.');"
++ "  document.getElementById('start-btn').click();"
++ "  await sleep(1600);"
++ "  try{"
++ "    LOG('Moving out of intro corridor…');"
++ "    await goto(0,14);"
++ "    LOG('Blackout triggered. Locating guard desk.');"
++ "    await goto(-3,7.1);"
++ "    await interact(-3,0.85,6,'KEYCARD');"
++ "    LOG('Keycard Alpha acquired.','win');"
++ "    await goto(0,2.0);"
++ "    await interact(0,1.4,0,'ALPHA');"
++ "    LOG('Blast door unlocked. Entering Power Grid.','win');"
++ "    await goto(0,-2);"
++ "    await goto(-6.5,-13.3);"
++ "    await interact(-6.5,1.2,-14.5,'GENERATOR A');"
++ "    LOG('Generator A online.','win');"
++ "    await goto(0,-10);"
++ "    await goto(6.5,-13.3);"
++ "    await interact(6.5,1.2,-14.5,'GENERATOR B');"
++ "    LOG('Generator B online. Power restored.','win');"
++ "    await goto(0,-18);"
++ "    await goto(0,-28.2);"
++ "    await interact(0,1.2,-29.9,'BIO TERMINAL');"
++ "    LOG('Security log recovered. Code = 7342.','win');"
++ "    hideOverlays();"
++ "    await sleep(400);"
++ "    await goto(2.3,-36);"
++ "    await goto(2.3,-38.3);"
++ "    await interact(2.3,1.5,-39.9,'CONTAINMENT CODE');"
++ "    LOG('Vault passcode accepted. Door opening.','win');"
++ "    await sleep(1200);"
++ "    await goto(0,-41.5);"
++ "    await goto(0,-52);"
++ "    await goto(0,-58.5);"
++ "    await interact(0,-1.4,-62,'OVERLOAD');"
++ "    LOG('Overload sequence initiated.','win');"
++ "  }catch(e){ LOG('Run interrupted: '+e,'warn'); }"
++ "}"
++ "run();"
++ "})();";
+
+var iframe = document.getElementById('game-frame');
+var dot = document.getElementById('status-dot');
+var statusText = document.getElementById('status-text');
+var logBody = document.getElementById('log-body');
+var logPanel = document.getElementById('log-panel');
+var t0 = Date.now();
+
+document.getElementById('log-toggle').onclick = function(){ logPanel.classList.toggle('open'); };
+logPanel.classList.add('open'); // open by default so the user sees the bot think
+
+function addLog(msg, cls){
+    var line = document.createElement('div');
+    var t = document.createElement('span'); t.className='t';
+    t.textContent = ((Date.now()-t0)/1000).toFixed(1)+'s';
+    var m = document.createElement('span');
+    if(cls) m.className = cls;
+    m.textContent = msg;
+    line.appendChild(t); line.appendChild(m);
+    logBody.appendChild(line);
+    while(logBody.children.length>200) logBody.removeChild(logBody.firstChild);
+    logBody.scrollTop = logBody.scrollHeight;
+}
+
+iframe.addEventListener('load', function(){
+    try{
+        iframe.contentWindow.eval(BOT_SRC);
+        dot.className='on'; statusText.textContent='bot injected — playing';
+        document.getElementById('bot-badge').style.display='block';
+        addLog('Bot injected into index.html successfully','win');
+    }catch(e){
+        dot.className='err'; statusText.textContent='blocked by browser';
+        document.getElementById('err-overlay').style.display='flex';
+        addLog('Injection failed: '+e.message,'warn');
+    }
+});
+
+window.addEventListener('message', function(e){
+    if(!iframe.contentWindow || e.source!==iframe.contentWindow) return;
+    if(e.data && e.data.from==='lab-bot'){
+        if(e.data.type==='log') addLog(e.data.msg, e.data.cls);
+        if(e.data.type==='victory'){
+            addLog('VICTORY confirmed by game.','win');
+            if(document.getElementById('autorestart').checked){
+                addLog('Auto-restart in 6s…');
+                setTimeout(function(){ iframe.src = iframe.src; }, 6000);
+            }
+        }
+    }
+});
+</script>
+</body>
+</html>
