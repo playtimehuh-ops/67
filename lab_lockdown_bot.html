@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LAB: LOCKDOWN — AUTOPILOT BOT</title>
+<title>LAB: LOCKDOWN — AUTOPILOT BOT (Chapter 1: Descent)</title>
 <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body, html { width: 100%; height: 100%; overflow: hidden; background: #05070a; color: #cfd8dc; font-family: 'Courier New', monospace; }
@@ -22,16 +22,17 @@
     #wrap { position: absolute; top: 46px; left: 0; right: 0; bottom: 0; }
     iframe { width: 100%; height: 100%; border: none; display: block; }
     #log-panel {
-        position: absolute; top: 56px; right: 10px; width: 360px; max-height: calc(100% - 70px);
+        position: absolute; top: 56px; right: 10px; width: 380px; max-height: calc(100% - 70px);
         background: rgba(6, 12, 17, 0.94); border: 1px solid #1e3a4c; z-index: 30;
         display: none; flex-direction: column; box-shadow: 0 0 25px rgba(0,0,0,0.7);
     }
     #log-panel.open { display: flex; }
-    #log-head { padding: 8px 12px; font-size: 11px; letter-spacing: 2px; color: #00ffcc; border-bottom: 1px solid #1e3a4c; }
+    #log-head { padding: 8px 12px; font-size: 11px; letter-spacing: 2px; color: #00ffcc; border-bottom: 1px solid #1e3a4c; display:flex; justify-content:space-between; }
     #log-body { padding: 8px 12px; overflow-y: auto; font-size: 11px; line-height: 1.7; flex: 1; }
     #log-body .t { color: #556; margin-right: 6px; }
     #log-body .win { color: #00ffcc; font-weight: bold; }
     #log-body .warn { color: #ffaa00; }
+    #log-body .act { color: #ff66cc; font-weight: bold; }
     #err-overlay {
         position: absolute; inset: 0; background: rgba(5,5,8,0.97); z-index: 50;
         display: none; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 30px;
@@ -44,23 +45,29 @@
         background: rgba(0,40,32,0.85); border: 1px solid #00ffcc; color: #00ffcc;
         font-size: 10px; letter-spacing: 2px; padding: 5px 12px; display: none;
     }
+    #timer-badge {
+        position: absolute; top: 56px; left: 50%; transform: translateX(-50%); z-index: 25; pointer-events: none;
+        background: rgba(20,10,0,0.85); border: 1px solid #ff9900; color: #ff9900;
+        font-size: 11px; letter-spacing: 2px; padding: 5px 14px; display: none;
+    }
 </style>
 </head>
 <body>
 <div id="topbar">
     <span id="status-dot"></span>
     <span class="title">LAB: LOCKDOWN</span>
-    <span style="color:#5a6a76">// AUTOPILOT v1.0 — self-playing bot</span>
+    <span style="color:#5a6a76">// AUTOPILOT v2.0 — plays Chapter 1: Descent start-to-finish</span>
     <span id="status-text" style="color:#5a6a76">connecting…</span>
-    <label><input type="checkbox" id="autorestart" checked> AUTO-RESTART AFTER VICTORY</label>
+    <label><input type="checkbox" id="autorestart"> AUTO-RESTART AFTER VICTORY</label>
     <button id="log-toggle">BOT LOG</button>
 </div>
 <div id="bot-badge">&#9889; BOT DRIVING</div>
+<div id="timer-badge">T+ 00:00:00</div>
 <div id="wrap">
     <iframe id="game-frame" src="index.html"></iframe>
 </div>
 <div id="log-panel">
-    <div id="log-head">BOT TELEMETRY</div>
+    <div id="log-head"><span>BOT TELEMETRY</span><span id="log-elapsed">00:00:00</span></div>
     <div id="log-body"></div>
 </div>
 <div id="err-overlay">
@@ -73,18 +80,22 @@
 
 <script>
 /* ================================================================
-   SMART BOT — injected into the game's own window.
-   Strategy:
-     1. Click NEW EXECUTION, then drive the real player object
-        through the real input system (keys[] + camera rotation),
-        so the bot genuinely PLAYS the game.
-     2. A* of waypoints through the facility with stuck-recovery.
-     3. Precision aiming: bot pitches/yaws the camera at each target
-        and lets the game's own raycaster register the interaction,
-        then fires handleInteraction() — exactly like a human pressing E.
-     4. NEVER-LOSE safety net: health/stamina/battery locked at 100,
-        and Specimen 09 is teleported back to its den if it ever
-        gets within 5m. The bot cannot die, period.
+   AUTOPILOT v2.0 — CHAPTER 1: DESCENT
+   ================================================================
+   This drives the real player object through the real input system
+   (keys[] + camera rotation) exactly as a human would, and — this is
+   the important part — it never sleep()s a fixed duration in place of
+   real game content. Every wait below is a poll loop against the
+   game's own authoritative state (STATE.gates[id], STATE.cutsceneActive,
+   STATE.loreRead[id], STATE.valvesTurned, currentGate, etc.). The game
+   enforces its own pacing (elevator rides, remote unlocks, hide-and-wait
+   tension beats, lore-log decrypt timers, cutscene minimum durations);
+   the bot simply plays honestly within it, the same as a human would.
+
+   NEVER-LOSE safety net is preserved from v1.0: health/stamina/battery
+   are locked at 100 and Specimen 09 is kept at arm's length. The bot
+   cannot die. It can still take the *full, real* runtime of the
+   chapter, because nothing about surviving skips content.
    ================================================================ */
 var BOT_SRC = "(function(){"
 + "if (window.__LAB_BOT__) return; window.__LAB_BOT__ = true;"
@@ -101,44 +112,76 @@ var BOT_SRC = "(function(){"
 + "var stuckFlip=false;"
 + "async function goto(x,z,tol){"
 + "  tol=tol||0.4;"
-+ "  var lastCheck=performance.now(), lx=player.pos.x, lz=player.pos.z;"
++ "  var lastCheck=performance.now(), lx=player.pos.x, lz=player.pos.z, giveUp=performance.now()+45000;"
 + "  while(Math.hypot(player.pos.x-x,player.pos.z-z)>tol){"
 + "    if(STATE.gameOver) throw 'game-over';"
-+ "    if(STATE.paused){ document.getElementById('resume-btn').click(); await sleep(200); }"
++ "    if(STATE.paused){ var rb=document.getElementById('resume-btn'); if(rb) rb.click(); await sleep(200); }"
++ "    while(STATE.cutsceneActive){ K(false,false,false,false); await frame(); }"
++ "    while(currentGate){ K(false,false,false,false); await frame(); }"
 + "    var d=Math.hypot(x-player.pos.x,z-player.pos.z);"
 + "    player.rot.y=Math.atan2(-(x-player.pos.x),-(z-player.pos.z));"
 + "    player.rot.x=0;"
 + "    var danger=(typeof monster!=='undefined'&&monster)?monster.group.position.distanceTo(player.pos):99;"
-+ "    keys['ShiftLeft']=(d>7&&danger>9&&STATE.stamina>40);"
++ "    keys['ShiftLeft']=(d>6&&danger>6&&STATE.stamina>20);"
 + "    K(true,false,false,false);"
 + "    if(performance.now()-lastCheck>650){"
 + "      if(Math.hypot(player.pos.x-lx,player.pos.z-lz)<0.18){"
-+ "        K(false,true,false,false); await sleep(320); K(false,false,false,true); await sleep(320); stuckFlip=!stuckFlip; if(stuckFlip){K(true,false,false,false);}else{K(false,false,true,false); await sleep(260);}"
++ "        K(false,true,false,false); await sleep(320); K(false,false,false,true); await sleep(320);"
++ "        stuckFlip=!stuckFlip; if(stuckFlip){K(true,false,false,false);}else{K(false,false,true,false); await sleep(260);}"
 + "      }"
 + "      lastCheck=performance.now(); lx=player.pos.x; lz=player.pos.z;"
 + "    }"
++ "    if(performance.now()>giveUp){ LOG('goto timeout toward '+x+','+z+' — pressing on anyway','warn'); break; }"
 + "    await frame();"
 + "  }"
 + "  K(false,false,false,false); keys['ShiftLeft']=false;"
 + "}"
-+ "async function interact(px,py,pz,match){"
-+ "  for(var i=0;i<90;i++){"
++ "async function waitNoGate(){ while(currentGate){ await frame(); } }"
++ "async function waitCutscene(){ while(STATE.cutsceneActive){ await frame(); } }"
++ "async function waitFlag(getter, label, timeoutMs){"
++ "  var give=performance.now()+(timeoutMs||600000);"
++ "  while(!getter()){"
++ "    if(STATE.gameOver) throw 'game-over';"
++ "    if(performance.now()>give){ LOG('TIMEOUT waiting for: '+label,'warn'); return false; }"
++ "    await frame();"
++ "  }"
++ "  return true;"
++ "}"
++ "async function interact(px,py,pz,match,noWaitGate){"
++ "  for(var i=0;i<110;i++){"
 + "    if(STATE.gameOver) throw 'game-over';"
 + "    facePoint(px,py,pz);"
 + "    await frame();"
 + "    if(activeInteractable && activeInteractable.prompt.indexOf(match)>=0){"
-+ "      handleInteraction(); await sleep(120); return true;"
++ "      handleInteraction(); await sleep(140);"
++ "      if(!noWaitGate) await waitNoGate();"
++ "      return true;"
 + "    }"
 + "  }"
 + "  var it=null;"
 + "  for(var j=0;j<interactables.length;j++){ if(interactables[j].prompt.indexOf(match)>=0){ it=interactables[j]; break; } }"
-+ "  if(it){ LOG('raycast fallback for: '+match,'warn'); it.action(); return true; }"
++ "  if(it){ LOG('raycast fallback for: '+match,'warn'); it.action(); await sleep(140); if(!noWaitGate) await waitNoGate(); return true; }"
 + "  LOG('INTERACT FAILED: '+match,'warn'); return false;"
 + "}"
++ "async function readLoreDoc(px,py,pz,match,loreId){"
++ "  var ok=await interact(px,py,pz,match,true);"
++ "  if(!ok) return false;"
++ "  await waitFlag(function(){ return STATE.loreRead[loreId]; }, 'lore:'+loreId, 400000);"
++ "  var btn=document.getElementById('doc-close-btn');"
++ "  if(btn && !btn.disabled) btn.click(); else if(typeof closeDocViewer==='function') closeDocViewer();"
++ "  await sleep(150);"
++ "  return true;"
++ "}"
++ "async function holdCrouchUntil(x,z,gateId,label){"
++ "  await goto(x,z,0.6);"
++ "  LOG('Holding position: '+label);"
++ "  keys['ControlLeft']=true; K(false,false,false,false);"
++ "  await waitFlag(function(){ return STATE.gates[gateId]; }, 'hide:'+gateId, 900000);"
++ "  keys['ControlLeft']=false;"
++ "}"
 + "function hideOverlays(){"
-+ "  try{ closeDocViewer(); }catch(e){}"
++ "  try{ if(typeof closeDocViewer==='function') closeDocViewer(); }catch(e){}"
 + "  var dm=document.getElementById('inventory-modal'); if(dm) dm.style.display='none';"
-+ "  var dv=document.getElementById('doc-viewer'); if(dv) dv.style.display='none';"
 + "}"
 + "/* --- NEVER-LOSE SAFETY NET --- */"
 + "setInterval(function(){"
@@ -150,15 +193,15 @@ var BOT_SRC = "(function(){"
 + "      updateBar('stamina-fill',100); updateBar('battery-fill',100);"
 + "      if(typeof monster!=='undefined'&&monster&&monster.group){"
 + "        if(monster.group.position.distanceTo(player.pos)<5){"
-+ "          monster.group.position.set(0,1,-25);"
-+ "          monster.state='PATROL';"
++ "          var away=new THREE.Vector3().subVectors(player.pos,monster.group.position).setY(0).normalize().multiplyScalar(-14);"
++ "          monster.group.position.copy(monster.homePos||monster.group.position);"
 + "          LOG('Specimen 09 repelled (safety net)','warn');"
 + "        }"
 + "      }"
 + "    }"
 + "    var end=document.getElementById('ending-screen');"
 + "    if(end && !end.classList.contains('hidden') && !window.__won){"
-+ "      window.__won=true; LOG('FACILITY OVERLOADED — PERFECT RUN COMPLETE','win');"
++ "      window.__won=true; LOG('CHAPTER 1 COMPLETE — PERFECT RUN','win');"
 + "      try{parent.postMessage({from:'lab-bot',type:'victory'},'*');}catch(e){}"
 + "    }"
 + "    var go=document.getElementById('game-over-screen');"
@@ -167,48 +210,183 @@ var BOT_SRC = "(function(){"
 + "    }"
 + "  }catch(e){}"
 + "},60);"
-+ "/* --- MAIN RUN --- */"
++ "/* --- MAIN RUN: full Chapter 1 critical path --- */"
 + "async function run(){"
 + "  LOG('Waiting for game engine…');"
 + "  while(typeof startGame!=='function'){ await sleep(150); }"
 + "  await sleep(600);"
 + "  LOG('Engine ready. Starting NEW EXECUTION.');"
 + "  document.getElementById('start-btn').click();"
-+ "  await sleep(1600);"
++ "  await sleep(800);"
 + "  try{"
-+ "    LOG('Moving out of intro corridor…');"
-+ "    await goto(0,14);"
-+ "    LOG('Blackout triggered. Locating guard desk.');"
++ "    LOG('--- ACT 0: AWAKENING ---','act');"
++ "    await waitCutscene();"
++ "    LOG('Leaving the rest station.');"
++ "    await goto(0,29);"
++ "    LOG('--- ACT I: LIGHTS OUT ---','act');"
++ "    await goto(0,12);"
 + "    await goto(-3,7.1);"
-+ "    await interact(-3,0.85,6,'KEYCARD');"
++ "    await interact(-3,0.85,6,'KEYCARD ALPHA');"
 + "    LOG('Keycard Alpha acquired.','win');"
 + "    await goto(0,2.0);"
-+ "    await interact(0,1.4,0,'ALPHA');"
-+ "    LOG('Blast door unlocked. Entering Power Grid.','win');"
-+ "    await goto(0,-2);"
-+ "    await goto(-6.5,-13.3);"
-+ "    await interact(-6.5,1.2,-14.5,'GENERATOR A');"
-+ "    LOG('Generator A online.','win');"
-+ "    await goto(0,-10);"
-+ "    await goto(6.5,-13.3);"
-+ "    await interact(6.5,1.2,-14.5,'GENERATOR B');"
-+ "    LOG('Generator B online. Power restored.','win');"
-+ "    await goto(0,-18);"
-+ "    await goto(0,-28.2);"
-+ "    await interact(0,1.2,-29.9,'BIO TERMINAL');"
-+ "    LOG('Security log recovered. Code = 7342.','win');"
-+ "    hideOverlays();"
-+ "    await sleep(400);"
-+ "    await goto(2.3,-36);"
-+ "    await goto(2.3,-38.3);"
-+ "    await interact(2.3,1.5,-39.9,'CONTAINMENT CODE');"
-+ "    LOG('Vault passcode accepted. Door opening.','win');"
-+ "    await sleep(1200);"
-+ "    await goto(0,-41.5);"
-+ "    await goto(0,-52);"
-+ "    await goto(0,-58.5);"
-+ "    await interact(0,-1.4,-62,'OVERLOAD');"
-+ "    LOG('Overload sequence initiated.','win');"
++ "    await interact(0,1.4,0,'ALPHA BLAST DOOR');"
++ "    LOG('Alpha blast door open.','win');"
++ "    await waitCutscene();"
++ ""
++ "    LOG('--- ACT II: CHAIN OF COMMAND ---','act');"
++ "    await goto(0,-14);"
++ "    LOG('Entering break room for the shutter code + Keycard Beta.');"
++ "    await goto(-14,-24);"
++ "    await interact(-20,0.85,-28,'KEYCARD BETA');"
++ "    LOG('Keycard Beta acquired.','win');"
++ "    await readLoreDoc(-10,0.9,-36,'STICKY NOTE','shutterNote');"
++ "    LOG('Shutter code recovered: 2481','win');"
++ "    LOG('Swinging by camera control for the log.');"
++ "    await goto(0,-30);"
++ "    await goto(6,-50);"
++ "    await readLoreDoc(6,1.3,-50,'CAMERA LOG','cameraLog');"
++ "    LOG('Approaching the collapsed section — taking the crawlspace around it.');"
++ "    await goto(0,-63);"
++ "    await goto(-16,-70);"
++ "    await goto(-16,-92);"
++ "    await goto(-2,-95);"
++ "    LOG('Clear of the crawlspace. Heading for the shutter.');"
++ "    await goto(0,-104);"
++ "    await interact(0,2,-108,'SECURITY SHUTTER');"
++ "    LOG('Waiting on Okafor to cycle the shutter remotely...');"
++ "    await waitFlag(function(){return STATE.gates['shutterUnlock'];},'shutterUnlock',400000);"
++ "    await interact(0,2,-108,'SECURITY SHUTTER');"
++ "    LOG('Shutter open.','win');"
++ ""
++ "    LOG('--- ACT III: DEAD GRID ---','act');"
++ "    await goto(0,-116);"
++ "    await waitCutscene();"
++ "    await goto(0,-140);"
++ "    LOG('Unlocking the Fuse Locker with Keycard Beta.');"
++ "    await goto(-14,-155);"
++ "    await interact(-20,1.7,-155,'FUSE LOCKER');"
++ "    await goto(-27,-155);"
++ "    await interact(-24,0.9,-150,'SPARE FUSE'); await interact(-30,0.9,-150,'SPARE FUSE');"
++ "    await interact(-24,0.9,-160,'SPARE FUSE'); await interact(-30,0.9,-160,'SPARE FUSE');"
++ "    LOG('All 4 fuses collected.','win');"
++ "    await readLoreDoc(-27,1.4,-155,'FOREMAN','hendricksNote');"
++ "    LOG('Valve order noted: WEST, EAST, SOUTH.');"
++ "    LOG('Installing generators A-D.');"
++ "    await goto(0,-155);"
++ "    await goto(-14,-175); await goto(-26,-177.5);"
++ "    await interact(-26,1.2,-177.5,'GENERATOR A'); await waitNoGate();"
++ "    await goto(-14,-175); await goto(14,-175); await goto(26,-177.5);"
++ "    await interact(26,1.2,-177.5,'GENERATOR B'); await waitNoGate();"
++ "    await goto(14,-175); await goto(0,-195); await goto(-14,-210); await goto(-26,-212.5);"
++ "    await interact(-26,1.2,-212.5,'GENERATOR C'); await waitNoGate();"
++ "    await goto(-14,-210); await goto(14,-210); await goto(26,-212.5);"
++ "    await interact(26,1.2,-212.5,'GENERATOR D'); await waitNoGate();"
++ "    LOG('All 4 generators online. Waiting for grid stabilization...');"
++ "    await waitFlag(function(){return STATE.gates['powerGridStabilize'];},'powerGridStabilize',400000);"
++ "    LOG('Power grid restored.','win');"
++ "    await waitCutscene();"
++ "    await goto(14,-210); await goto(0,-230);"
++ "    await holdCrouchUntil(-3,-260,'maintenanceHunt','waiting out the patrol');"
++ "    LOG('Patrol cleared.','win');"
++ "    await goto(0,-292);"
++ "    await interact(0,2,-295,'SUBLEVEL ACCESS DOOR');"
++ "    await goto(0,-308);"
++ "    await interact(0,1.2,-308,'CALL MAINTENANCE LIFT');"
++ "    LOG('Riding the Maintenance Lift...');"
++ "    await waitFlag(function(){return STATE.gates['elevMaint'];},'elevMaint',400000);"
++ "    await waitCutscene();"
++ "    LOG('Arrived: Bio-Research sublevel.','win');"
++ ""
++ "    LOG('--- ACT IV: CLEAN ROOM ---','act');"
++ "    await goto(0,-708);"
++ "    await interact(0,1.2,-714,'DECONTAMINATION CYCLE');"
++ "    await waitFlag(function(){return STATE.gates['decon'];},'decon',200000);"
++ "    await goto(0,-724);"
++ "    await goto(3,-735); await interact(3,0.9,-735,'PHOTOGRAPH');"
++ "    await goto(-3,-745); await readLoreDoc(-3,1.1,-745,'PERSONNEL FILE','vossFile');"
++ "    await goto(0,-760);"
++ "    await goto(6,-790); await readLoreDoc(6,1.2,-790,'AUDIO LOG','okaforTape');"
++ "    LOG('Collecting the 3 vault code fragments.');"
++ "    await goto(0,-775); await goto(-16,-775); await goto(-32,-775);"
++ "    await readLoreDoc(-32,1.3,-775,'TERMINAL — ALPHA','term1');"
++ "    await goto(-16,-775); await goto(0,-805);"
++ "    await readLoreDoc(0,1.3,-805,'TERMINAL — BETA','term2');"
++ "    await goto(0,-825); await goto(16,-825); await goto(32,-825);"
++ "    await readLoreDoc(32,1.3,-825,'TERMINAL — GAMMA','term3');"
++ "    LOG('Vault code assembled: '+(STATE.vaultCode||'??????'),'win');"
++ "    await goto(16,-825); await goto(0,-845);"
++ "    LOG('Grabbing Keycard Gamma from the nest.');"
++ "    await goto(-8,-845); await goto(-40,-845);"
++ "    await interact(-40,0.9,-845,'KEYCARD GAMMA');"
++ "    LOG('Keycard Gamma acquired — specimen alerted.','win');"
++ "    await holdCrouchUntil(-9,-845,'specimenNest','waiting for it to lose interest');"
++ "    LOG('Clear.','win');"
++ "    await waitCutscene();"
++ "    await goto(0,-850);"
++ "    await interact(0,2,-855,'REINFORCED SECURITY DOOR');"
++ "    LOG('Waiting on Okafor to override the reinforced door...');"
++ "    await waitFlag(function(){return STATE.gates['gammaDoorUnlock'];},'gammaDoorUnlock',400000);"
++ "    await interact(0,2,-855,'REINFORCED SECURITY DOOR');"
++ "    await goto(0,-868);"
++ "    await interact(0,1.2,-868,'SUB-CORE DESCENT');"
++ "    LOG('Riding the elevator to Sub-Core...');"
++ "    await waitFlag(function(){return STATE.gates['elevCore'];},'elevCore',500000);"
++ "    await waitCutscene();"
++ "    LOG('Arrived: Sub-Core.','win');"
++ ""
++ "    LOG('--- ACT V: SUB-CORE ---','act');"
++ "    await goto(0,-1208);"
++ "    await interact(0,2,-1225,'VENT ACCESS TUNNEL');"
++ "    await waitFlag(function(){return STATE.gates['reactorPurge'];},'reactorPurge',400000);"
++ "    await goto(0,-1225);"
++ "    LOG('Turning coolant valves in order: WEST, EAST, SOUTH.');"
++ "    await goto(-20,-1250); await goto(-26,-1260);"
++ "    await interact(-26,1,-1260,'WEST COOLANT VALVE'); await waitNoGate();"
++ "    await goto(0,-1250); await goto(20,-1250); await goto(26,-1260);"
++ "    await interact(26,1,-1260,'EAST COOLANT VALVE'); await waitNoGate();"
++ "    await goto(0,-1280); await goto(0,-1292);"
++ "    await interact(0,1,-1292,'SOUTH COOLANT VALVE'); await waitNoGate();"
++ "    LOG('All valves correct. Waiting for coolant to stabilize...');"
++ "    await waitFlag(function(){return STATE.gates['coolantStabilize'];},'coolantStabilize',400000);"
++ "    LOG('Coolant stable.','win');"
++ "    await goto(0,-1298);"
++ "    await goto(0,-1330); await goto(0,-1358);"
++ "    await interact(0,2.5,-1360,'CORE VAULT KEYPAD');"
++ "    LOG('Waiting for pressure seals to release...');"
++ "    await waitFlag(function(){return STATE.gates['vaultPreSeal'];},'vaultPreSeal',400000);"
++ "    LOG('Vault open.','win');"
++ "    await waitCutscene();"
++ "    await goto(0,-1370);"
++ "    LOG('Waiting for reactor shutdown before arming charges...');"
++ "    await interact(0,0.6,-1390,'CORE OVERLOAD CONSOLE');"
++ "    await waitFlag(function(){return STATE.gates['reactorShutdown'];},'reactorShutdown',400000);"
++ "    LOG('Reactor cooled. Arming charges.','win');"
++ "    await goto(-15,-1375); await goto(-26,-1375);"
++ "    await interact(-26,1,-1375,'ARM DEMOLITION CHARGE'); await waitNoGate();"
++ "    await goto(0,-1375); await goto(15,-1375); await goto(26,-1375);"
++ "    await interact(26,1,-1375,'ARM DEMOLITION CHARGE'); await waitNoGate();"
++ "    await goto(0,-1390); await goto(0,-1410);"
++ "    await interact(0,1,-1410,'ARM DEMOLITION CHARGE'); await waitNoGate();"
++ "    LOG('All 3 charges armed ('+STATE.chargesArmed+'/3). Triggering overload.','win');"
++ "    await goto(0,-1390);"
++ "    await interact(0,0.6,-1390,'CORE OVERLOAD CONSOLE');"
++ "    LOG('OVERLOAD INITIATED — ESCAPE SEQUENCE.','warn');"
++ ""
++ "    LOG('--- ESCAPE ---','act');"
++ "    await goto(0,-1360);"
++ "    await goto(0,-1330); await goto(0,-1300);"
++ "    await goto(0,-1280); await goto(0,-1225);"
++ "    await interact(0,2,-1225,'SEAL OVERRIDE');"
++ "    LOG('Forcing the resealed blast door...');"
++ "    await waitFlag(function(){return STATE.gates['finalSeal'];},'finalSeal',400000);"
++ "    LOG('Door forced. Go, go, go.','win');"
++ "    await goto(0,-1210);"
++ "    await interact(0,1.2,-1202,'ELEVATOR CONTROL');"
++ "    LOG('Riding the emergency elevator to the surface...');"
++ "    await waitFlag(function(){return STATE.gates['elevFinal'];},'elevFinal',600000);"
++ "    LOG('Surface reached.','win');"
++ "    await waitCutscene();"
++ "    LOG('CHAPTER 1: DESCENT — COMPLETE.','win');"
 + "  }catch(e){ LOG('Run interrupted: '+e,'warn'); }"
 + "}"
 + "run();"
@@ -219,30 +397,46 @@ var dot = document.getElementById('status-dot');
 var statusText = document.getElementById('status-text');
 var logBody = document.getElementById('log-body');
 var logPanel = document.getElementById('log-panel');
+var logElapsed = document.getElementById('log-elapsed');
+var timerBadge = document.getElementById('timer-badge');
 var t0 = Date.now();
 
 document.getElementById('log-toggle').onclick = function(){ logPanel.classList.toggle('open'); };
-logPanel.classList.add('open'); // open by default so the user sees the bot think
+logPanel.classList.add('open'); // open by default so the user can watch the bot think
+
+function fmt(ms){
+    var s = Math.floor(ms/1000);
+    var h = String(Math.floor(s/3600)).padStart(2,'0');
+    var m = String(Math.floor((s%3600)/60)).padStart(2,'0');
+    var ss = String(s%60).padStart(2,'0');
+    return h+':'+m+':'+ss;
+}
+setInterval(function(){
+    var el = fmt(Date.now()-t0);
+    logElapsed.innerText = el;
+    timerBadge.innerText = 'T+ ' + el;
+}, 1000);
 
 function addLog(msg, cls){
     var line = document.createElement('div');
     var t = document.createElement('span'); t.className='t';
-    t.textContent = ((Date.now()-t0)/1000).toFixed(1)+'s';
+    t.textContent = fmt(Date.now()-t0);
     var m = document.createElement('span');
     if(cls) m.className = cls;
     m.textContent = msg;
     line.appendChild(t); line.appendChild(m);
     logBody.appendChild(line);
-    while(logBody.children.length>200) logBody.removeChild(logBody.firstChild);
+    while(logBody.children.length>400) logBody.removeChild(logBody.firstChild);
     logBody.scrollTop = logBody.scrollHeight;
 }
 
 iframe.addEventListener('load', function(){
     try{
         iframe.contentWindow.eval(BOT_SRC);
-        dot.className='on'; statusText.textContent='bot injected — playing';
+        dot.className='on'; statusText.textContent='bot injected — playing Chapter 1: Descent';
         document.getElementById('bot-badge').style.display='block';
-        addLog('Bot injected into index.html successfully','win');
+        timerBadge.style.display='block';
+        addLog('Bot injected into index.html successfully. This is the full chapter — expect ~2+ hours.','win');
     }catch(e){
         dot.className='err'; statusText.textContent='blocked by browser';
         document.getElementById('err-overlay').style.display='flex';
@@ -255,10 +449,10 @@ window.addEventListener('message', function(e){
     if(e.data && e.data.from==='lab-bot'){
         if(e.data.type==='log') addLog(e.data.msg, e.data.cls);
         if(e.data.type==='victory'){
-            addLog('VICTORY confirmed by game.','win');
+            addLog('VICTORY confirmed by game. Total run time: '+fmt(Date.now()-t0),'win');
             if(document.getElementById('autorestart').checked){
-                addLog('Auto-restart in 6s…');
-                setTimeout(function(){ iframe.src = iframe.src; }, 6000);
+                addLog('Auto-restart in 8s…');
+                setTimeout(function(){ iframe.src = iframe.src; t0 = Date.now(); window.__won=false; }, 8000);
             }
         }
     }
